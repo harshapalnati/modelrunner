@@ -238,10 +238,13 @@ struct ChatRequest {
     #[allow(dead_code)]
     model: Option<String>,
     messages: Vec<ChatMessage>,
-    #[allow(dead_code)]
     stream: Option<bool>,
     #[allow(dead_code)]
     max_tokens: Option<usize>,
+    #[allow(dead_code)]
+    temperature: Option<f32>,
+    #[allow(dead_code)]
+    top_p: Option<f32>,
 }
 
 #[derive(serde::Serialize)]
@@ -271,6 +274,32 @@ async fn chat_completions(State(state): State<AppState>, Json(req): Json<ChatReq
         choices: vec![ChatChoice { index: 0, message: ChatChoiceMessage { role: "assistant".into(), content: text }, finish_reason: "stop".into() }],
     };
     Json(resp)
+}
+
+// Streamed chat (OpenAI-style) when stream=true
+async fn chat_completions_stream(State(state): State<AppState>, Json(req): Json<ChatRequest>) -> Sse<impl axum::response::sse::Stream<Item = Result<Event>>> {
+    state.requests_total.inc();
+    let (tx, rx) = tokio::sync::mpsc::channel(32);
+    tokio::spawn(async move {
+        let id = "chatcmpl-stream-1";
+        // Minimal prompt to delta frames demo
+        let tokens = ["H", "e", "l", "l", "o"];
+        for t in tokens {
+            let frame = serde_json::json!({
+                "id": id,
+                "object": "chat.completion.chunk",
+                "choices": [{
+                    "index": 0,
+                    "delta": {"content": t},
+                    "finish_reason": null
+                }]
+            });
+            let _ = tx.send(Ok(Event::default().data(frame.to_string()))).await;
+        }
+        let _ = tx.send(Ok(Event::default().data("[DONE]"))).await;
+    });
+    let stream = ReceiverStream::new(rx).map(|e| e);
+    Sse::new(stream)
 }
 
 #[derive(serde::Deserialize)]

@@ -9,6 +9,7 @@ impl Scheduler {
 pub mod decode {
     use runner_backend::InferenceBackend;
     use runner_common::Result;
+    use super::sampler::{sample_top_k_top_p};
 
     pub fn generate_once(
         backend: &dyn InferenceBackend,
@@ -18,6 +19,8 @@ pub mod decode {
         let _ = max_tokens; // unused in mock path
         // Try to use backend tokenize/detokenize; if not available, fall back to echo.
         let tokens = backend.tokenize(prompt).unwrap_or_default();
+        // For now, return detokenized prompt; sampling comes once logits are exposed
+        let _ = sample_top_k_top_p::<rand::rngs::StdRng>(&[0.0_f32; 1], 0, 1.0, 1.0, None);
         let text = backend.detokenize(&tokens).unwrap_or_else(|_| prompt.to_string());
         Ok(text)
     }
@@ -168,6 +171,46 @@ pub mod kv {
         pub fn is_common(&self, h: u64) -> bool { let g = self.counts.lock().unwrap(); g.get(&h).copied().unwrap_or(0) >= 2 }
         pub fn put_tokens(&self, h: u64, toks: Vec<u32>) { let mut t = self.tokens.lock().unwrap(); t.insert(h, toks); }
         pub fn get_tokens(&self, h: u64) -> Option<Vec<u32>> { let t = self.tokens.lock().unwrap(); t.get(&h).cloned() }
+    }
+}
+
+pub mod sampler {
+    use rand::prelude::*;
+
+    pub fn sample_top_k_top_p<R: Rng + ?Sized>(
+        logits: &[f32],
+        top_k: usize,
+        top_p: f32,
+        temperature: f32,
+        seed: Option<u64>,
+    ) -> usize {
+        let mut rng: StdRng = match seed { Some(s) => SeedableRng::seed_from_u64(s), None => StdRng::from_entropy() };
+        if logits.is_empty() { return 0; }
+        let mut pairs: Vec<(usize, f32)> = logits.iter().enumerate().map(|(i, &l)| (i, l / temperature.max(1e-4))).collect();
+        pairs.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+        let mut cutoff = pairs.len();
+        if top_k > 0 { cutoff = cutoff.min(top_k); }
+        let mut sum = 0.0_f32;
+        let mut probs: Vec<(usize, f32)> = Vec::with_capacity(cutoff);
+        for &(i, l) in &pairs[..cutoff] {
+            let p = (l).exp();
+            probs.push((i, p));
+            sum += p;
+        }
+        probs.iter_mut().for_each(|p| p.1 /= sum.max(1e-9));
+        if top_p < 1.0 {
+            probs.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+            let mut acc = 0.0_f32;
+            let mut keep = 0;
+            for &(_, p) in &probs { acc += p; keep += 1; if acc >= top_p { break; } }
+            probs.truncate(keep);
+            let z: f32 = probs.iter().map(|p| p.1).sum();
+            for p in &mut probs { p.1 /= z.max(1e-9); }
+        }
+        let r: f32 = rng.gen();
+        let mut acc = 0.0_f32;
+        for (i, p) in probs { acc += p; if r <= acc { return i; } }
+        pairs[0].0
     }
 }
 
