@@ -16,7 +16,7 @@ use runner_backend_llamacpp::LlamaCppBackend;
 use runner_core::decode::generate_once;
 use runner_core::scheduler::{SchedulerV1, Handle};
 use runner_core::kv::{PagedKvManager, PrefixCache};
-use runner_common::Result;
+use runner_common::{Result, config::RunnerConfig};
 use tokio_stream::{wrappers::ReceiverStream, StreamExt as _};
 use runner_obs::{init as obs_init, spawn_gpu_polling};
 
@@ -42,7 +42,8 @@ pub fn app() -> Router {
     let backend: Arc<dyn InferenceBackend> = select_backend();
     obs_init();
     spawn_gpu_polling();
-    let kv = PagedKvManager::new(512 * 1024 * 1024); // 512MB placeholder
+    let cfg = RunnerConfig::load();
+    let kv = PagedKvManager::new(512 * 1024 * 1024);
     let prefix = PrefixCache::new();
     let scheduler = SchedulerV1::start(backend.clone(), kv.clone(), prefix.clone());
     let queue_depth_gauge = prometheus::register_int_gauge!("runner_queue_depth", "Scheduler queue depth").expect("gauge");
@@ -71,6 +72,9 @@ pub fn app() -> Router {
         batch_size_gauge,
         kv_used_blocks,
         kv_capacity_blocks,
+        limiter: RateLimiter::new(),
+        budgets: TokenBudgets::new(),
+        model_path: tokio::sync::RwLock::new(std::env::var("RUNNER_MODEL").ok()),
     };
 
     Router::new()
@@ -260,20 +264,21 @@ struct ChatResponse {
     choices: Vec<ChatChoice>,
 }
 
-async fn chat_completions(State(state): State<AppState>, Json(req): Json<ChatRequest>) -> Json<ChatResponse> {
+async fn chat_completions(State(state): State<AppState>, Json(req): Json<ChatRequest>) -> axum::response::Response {
     state.requests_total.inc();
-    if !state.limiter.check_allow(&tenant_id()).await { return Json(ChatResponse { id: "rate-limited".into(), object: "chat.completion".into(), choices: vec![ChatChoice { index: 0, message: ChatChoiceMessage { role: "assistant".into(), content: String::from("RATE_LIMITED") }, finish_reason: "stop".into() }] }); }
+    if !state.limiter.check_allow(&tenant_id()).await {
+        let resp = ChatResponse { id: "rate-limited".into(), object: "chat.completion".into(), choices: vec![ChatChoice { index: 0, message: ChatChoiceMessage { role: "assistant".into(), content: String::from("RATE_LIMITED") }, finish_reason: "stop".into() }] };
+        return Json(resp).into_response();
+    }
     tracing::info!(target: "api", "chat request: {} messages", req.messages.len());
     let mut prompt = String::new();
     for m in &req.messages { if m.role == "system" || m.role == "user" { prompt.push_str(&m.content); prompt.push('\n'); } }
-    let text = generate_once(state.backend.as_ref(), &prompt, req.max_tokens.unwrap_or(128))
-        .unwrap_or_else(|_| String::new());
-    let resp = ChatResponse {
-        id: "chatcmpl-1".into(),
-        object: "chat.completion".into(),
-        choices: vec![ChatChoice { index: 0, message: ChatChoiceMessage { role: "assistant".into(), content: text }, finish_reason: "stop".into() }],
-    };
-    Json(resp)
+    if req.stream.unwrap_or(false) {
+        return chat_completions_stream(state, Json(req)).await.into_response();
+    }
+    let text = generate_once(state.backend.as_ref(), &prompt, req.max_tokens.unwrap_or(128)).unwrap_or_else(|_| String::new());
+    let resp = ChatResponse { id: "chatcmpl-1".into(), object: "chat.completion".into(), choices: vec![ChatChoice { index: 0, message: ChatChoiceMessage { role: "assistant".into(), content: text }, finish_reason: "stop".into() }] };
+    Json(resp).into_response()
 }
 
 // Streamed chat (OpenAI-style) when stream=true

@@ -59,3 +59,21 @@ export LLAMA_CPP_DIR=third_party/llama.cpp
 $env:LLAMA_CPP_DIR="third_party/llama.cpp"
 ```
 
+## Docker images
+
+CPU build:
+
+```bash
+docker build -f runner/docker/Dockerfile.cpu -t next-runner:cpu .
+docker run --rm -p 8080:8080 -e RUNNER_MODEL=/models/model.gguf -v $PWD/runner/models:/models next-runner:cpu
+```
+
+CUDA build (requires NVIDIA container runtime):
+
+```bash
+docker build -f runner/docker/Dockerfile.cuda -t next-runner:cuda .
+docker run --rm --gpus all -p 8080:8080 -e RUNNER_MODEL=/models/model.gguf -v $PWD/runner/models:/models next-runner:cuda
+```
+
+Note: Metal (Apple) is not supported in Docker; ship native macOS binaries instead.
+

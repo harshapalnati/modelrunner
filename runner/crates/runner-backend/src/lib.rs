@@ -1,16 +1,19 @@
 use runner_common::Result;
 
 #[derive(Debug, Clone, Default)]
-pub struct LoadParams;
+pub struct LoadParams {
+    pub n_ctx: usize,
+    pub n_gpu_layers: usize,
+}
 
 #[derive(Debug, Clone, Default)]
 pub struct ModelHandle;
 
 #[derive(Debug, Clone, Default)]
-pub struct SequenceState;
+pub struct SequenceState { pub tokens: Vec<u32>, pub max_new_tokens: usize }
 
 #[derive(Debug, Clone, Default)]
-pub struct ForwardOutput;
+pub struct ForwardOutput { pub logits: Option<Vec<f32>>, pub token: Option<u32> }
 
 #[derive(Debug, Clone, Default)]
 pub struct KvStats;

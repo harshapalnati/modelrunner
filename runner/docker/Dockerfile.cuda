@@ -1,0 +1,32 @@
+# CUDA-enabled image with llama.cpp built (GGML_CUDA=1) and runner binary
+
+# ---- Stage 1: build llama.cpp with CUDA
+FROM nvidia/cuda:12.2.2-devel-ubuntu22.04 AS llama
+RUN apt-get update && apt-get install -y git build-essential cmake
+ENV CUDA_HOME=/usr/local/cuda
+WORKDIR /opt
+RUN git clone --depth=1 https://github.com/ggerganov/llama.cpp.git
+WORKDIR /opt/llama.cpp
+RUN cmake -S . -B build -DGGML_CUDA=ON -DBUILD_SHARED_LIBS=OFF && cmake --build build -j
+
+# ---- Stage 2: build runner using CUDA toolchain
+FROM nvidia/cuda:12.2.2-devel-ubuntu22.04 AS builder
+RUN apt-get update && apt-get install -y curl pkg-config clang git
+RUN curl https://sh.rustup.rs -sSf | bash -s -- -y
+ENV PATH=/root/.cargo/bin:$PATH
+WORKDIR /work
+COPY . .
+ENV LLAMA_CPP_DIR=/opt/llama.cpp/build
+COPY --from=llama /opt/llama.cpp/build /opt/llama.cpp/build
+RUN cargo build -p runner-cli --release
+
+# ---- Stage 3: runtime (CUDA)
+FROM nvidia/cuda:12.2.2-runtime-ubuntu22.04
+WORKDIR /app
+RUN apt-get update && apt-get install -y ca-certificates && rm -rf /var/lib/apt/lists/*
+COPY --from=builder /work/target/release/runner-cli /usr/local/bin/runner
+COPY --from=llama /opt/llama.cpp/build /opt/llama.cpp/build
+ENV LLAMA_CPP_DIR=/opt/llama.cpp/build
+EXPOSE 8080
+CMD ["runner","serve"]
+

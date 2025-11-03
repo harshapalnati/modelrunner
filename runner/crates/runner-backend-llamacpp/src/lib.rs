@@ -9,15 +9,10 @@ mod ffi {
 }
 
 #[derive(Default, Clone)]
-pub struct LlamaCppBackend {
-    state: Arc<Mutex<State>>,    
-}
+pub struct LlamaCppBackend { state: Arc<Mutex<State>> }
 
 #[derive(Default)]
-struct State {
-    model_loaded: bool,
-    model_path: Option<String>,
-}
+struct State { model_loaded: bool, model_path: Option<String>, model: *mut ffi::llama_model, ctx: *mut ffi::llama_context, n_ctx: i32 }
 
 impl LlamaCppBackend {
     pub fn new() -> Self { Self { state: Arc::new(Mutex::new(State::default())) } }
@@ -27,6 +22,19 @@ impl LlamaCppBackend {
         &self,
         prompt: &str,
         max_tokens: usize,
+        mut emit: F,
+    ) -> Result<String> {
+        self.generate_with_callback_params(prompt, max_tokens, 1.0, 1.0, 0, &mut emit)
+    }
+
+    #[cfg(llama_ffi)]
+    pub fn generate_with_callback_params<F: FnMut(String)>(
+        &self,
+        prompt: &str,
+        max_tokens: usize,
+        temperature: f32,
+        top_p: f32,
+        top_k: usize,
         mut emit: F,
     ) -> Result<String> {
         unsafe {
@@ -74,12 +82,8 @@ impl LlamaCppBackend {
                 let logits = ffi::llama_get_logits(ctx);
                 if logits.is_null() { break; }
                 let slice = std::slice::from_raw_parts(logits, vocab as usize);
-                // greedy argmax
-                let mut best_id: i32 = 0;
-                let mut best_val = f32::MIN;
-                for (i, &v) in slice.iter().enumerate() {
-                    if v > best_val { best_val = v; best_id = i as i32; }
-                }
+                let next_id = crate::sampler::sample_top_k_top_p::<rand::rngs::StdRng>(slice, top_k, top_p, temperature, None) as i32;
+                let best_id = next_id;
                 if best_id == eos { break; }
 
                 // detokenize this piece
@@ -105,26 +109,22 @@ impl LlamaCppBackend {
 }
 
 impl InferenceBackend for LlamaCppBackend {
-    fn load_model(&self, path: &str, _params: LoadParams) -> Result<ModelHandle> {
+    fn load_model(&self, path: &str, params: LoadParams) -> Result<ModelHandle> {
         #[cfg(llama_ffi)]
         unsafe {
             if ffi::llama_backend_init() != 0 { return Err(RunnerError::Message("llama_backend_init failed".into())); }
 
-            // Try loading model to ensure headers/libs are coherent
             let cpath = std::ffi::CString::new(path).unwrap();
-            let mut params = ffi::llama_model_default_params();
-            // vocab_only = true allows tokenization/detokenization without full memory
-            params.vocab_only = true;
-            let model = ffi::llama_load_model_from_file(cpath.as_ptr(), params);
-            if model.is_null() {
-                return Err(RunnerError::Message("llama_load_model_from_file failed".into()));
-            }
-            // Free immediately; we only validate availability here.
-            ffi::llama_free_model(model);
-            if let Ok(mut st) = self.state.lock() {
-                st.model_loaded = true;
-                st.model_path = Some(path.to_string());
-            }
+            let mut mparams = ffi::llama_model_default_params();
+            mparams.vocab_only = false;
+            let model = ffi::llama_load_model_from_file(cpath.as_ptr(), mparams);
+            if model.is_null() { return Err(RunnerError::Message("llama_load_model_from_file failed".into())); }
+            let mut cparams = ffi::llama_context_default_params();
+            cparams.n_ctx = params.n_ctx as i32;
+            cparams.n_gpu_layers = params.n_gpu_layers as i32;
+            let ctx = ffi::llama_new_context_with_model(model, cparams);
+            if ctx.is_null() { ffi::llama_free_model(model); return Err(RunnerError::Message("llama_new_context_with_model failed".into())); }
+            if let Ok(mut st) = self.state.lock() { st.model_loaded = true; st.model_path = Some(path.to_string()); st.model = model; st.ctx = ctx; st.n_ctx = cparams.n_ctx; }
             return Ok(ModelHandle::default());
         }
         #[allow(unreachable_code)]
@@ -135,37 +135,11 @@ impl InferenceBackend for LlamaCppBackend {
         #[cfg(llama_ffi)]
         unsafe {
             let st = self.state.lock().unwrap();
-            let Some(ref model_path) = st.model_path else { return Ok(vec![]) };
-            let cpath = std::ffi::CString::new(model_path.as_str()).unwrap();
-            let mut params = ffi::llama_model_default_params();
-            params.vocab_only = true;
-            let model = ffi::llama_load_model_from_file(cpath.as_ptr(), params);
-            if model.is_null() { return Ok(vec![]) }
-            let ctx_params = ffi::llama_context_default_params();
-            let ctx = ffi::llama_new_context_with_model(model, ctx_params);
-            if ctx.is_null() { ffi::llama_free_model(model); return Ok(vec![]) }
-
+            if st.ctx.is_null() { return Ok(vec![]) }
             let ctext = std::ffi::CString::new(text).unwrap();
-            // First call to get length
-            let n = ffi::llama_tokenize(
-                ctx,
-                ctext.as_ptr(),
-                std::ptr::null_mut(),
-                0,
-                true,
-                false,
-            );
+            let n = ffi::llama_tokenize(st.ctx, ctext.as_ptr(), std::ptr::null_mut(), 0, true, false);
             let mut buf: Vec<i32> = vec![0; n as usize];
-            let n2 = ffi::llama_tokenize(
-                ctx,
-                ctext.as_ptr(),
-                buf.as_mut_ptr(),
-                buf.len() as i32,
-                true,
-                false,
-            );
-            ffi::llama_free(ctx);
-            ffi::llama_free_model(model);
+            let n2 = ffi::llama_tokenize(st.ctx, ctext.as_ptr(), buf.as_mut_ptr(), buf.len() as i32, true, false);
             let toks: Vec<u32> = buf[..(n2 as usize)].iter().map(|t| *t as u32).collect();
             return Ok(toks);
         }
@@ -177,21 +151,12 @@ impl InferenceBackend for LlamaCppBackend {
         #[cfg(llama_ffi)]
         unsafe {
             let st = self.state.lock().unwrap();
-            let Some(ref model_path) = st.model_path else { return Ok(String::new()) };
-            let cpath = std::ffi::CString::new(model_path.as_str()).unwrap();
-            let mut params = ffi::llama_model_default_params();
-            params.vocab_only = true;
-            let model = ffi::llama_load_model_from_file(cpath.as_ptr(), params);
-            if model.is_null() { return Ok(String::new()) }
-            let ctx_params = ffi::llama_context_default_params();
-            let ctx = ffi::llama_new_context_with_model(model, ctx_params);
-            if ctx.is_null() { ffi::llama_free_model(model); return Ok(String::new()) }
-
+            if st.ctx.is_null() { return Ok(String::new()) }
             let mut out = String::new();
             for &t in tokens {
                 // Query piece size first
                 let needed = ffi::llama_token_to_piece(
-                    ctx,
+                    st.ctx,
                     t as i32,
                     std::ptr::null_mut(),
                     0,
@@ -200,7 +165,7 @@ impl InferenceBackend for LlamaCppBackend {
                 if needed > 0 {
                     let mut buf: Vec<i8> = vec![0; needed as usize + 1];
                     let written = ffi::llama_token_to_piece(
-                        ctx,
+                        st.ctx,
                         t as i32,
                         buf.as_mut_ptr(),
                         buf.len() as i32,
@@ -212,8 +177,6 @@ impl InferenceBackend for LlamaCppBackend {
                     }
                 }
             }
-            ffi::llama_free(ctx);
-            ffi::llama_free_model(model);
             return Ok(out);
         }
         #[allow(unreachable_code)]
@@ -224,8 +187,22 @@ impl InferenceBackend for LlamaCppBackend {
     }
 
     fn forward(&self, _requests: &mut [SequenceState]) -> Result<ForwardOutput> {
-        // Placeholder; once wired, this will call into llama_decode
-        Ok(ForwardOutput::default())
+        #[cfg(llama_ffi)]
+        unsafe {
+            let st = self.state.lock().unwrap();
+            if st.ctx.is_null() { return Ok(ForwardOutput::default()) }
+            // Perform one token step for a single implicit sequence using greedy
+            let logits_ptr = ffi::llama_get_logits(st.ctx);
+            if logits_ptr.is_null() { return Ok(ForwardOutput::default()) }
+            let vocab = ffi::llama_n_vocab(st.model);
+            let slice = std::slice::from_raw_parts(logits_ptr, vocab as usize);
+            let mut best_id: i32 = 0; let mut best_val = f32::MIN;
+            let mut copied: Vec<f32> = Vec::with_capacity(slice.len());
+            for (i, &v) in slice.iter().enumerate() { if v > best_val { best_val = v; best_id = i as i32; } copied.push(v); }
+            Ok(ForwardOutput { logits: Some(copied), token: Some(best_id as u32) })
+        }
+        #[allow(unreachable_code)]
+        { Ok(ForwardOutput::default()) }
     }
 
     fn kv_usage(&self) -> KvStats { KvStats::default() }
