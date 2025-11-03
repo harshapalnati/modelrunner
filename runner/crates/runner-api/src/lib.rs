@@ -10,7 +10,7 @@ use axum::{
 };
 use axum::extract::ws::{WebSocketUpgrade, Message};
 use once_cell::sync::Lazy;
-use prometheus::{Encoder, IntCounter, IntCounterVec, Histogram, HistogramOpts, TextEncoder};
+use prometheus::{Encoder, IntCounter, Histogram, TextEncoder};
 use runner_backend::{mock::MockBackend, InferenceBackend};
 use runner_backend_llamacpp::LlamaCppBackend;
 use runner_core::decode::generate_once;
@@ -33,7 +33,7 @@ pub struct AppState {
     kv_capacity_blocks: prometheus::IntGauge,
     limiter: RateLimiter,
     budgets: TokenBudgets,
-    model_path: tokio::sync::RwLock<Option<String>>,
+    model_path: std::sync::Arc<tokio::sync::RwLock<Option<String>>>,
 }
 
 static ENCODER: Lazy<TextEncoder> = Lazy::new(|| TextEncoder::new());
@@ -42,7 +42,7 @@ pub fn app() -> Router {
     let backend: Arc<dyn InferenceBackend> = select_backend();
     obs_init();
     spawn_gpu_polling();
-    let cfg = RunnerConfig::load();
+    let _cfg = RunnerConfig::load();
     let kv = PagedKvManager::new(512 * 1024 * 1024);
     let prefix = PrefixCache::new();
     let scheduler = SchedulerV1::start(backend.clone(), kv.clone(), prefix.clone());
@@ -74,7 +74,7 @@ pub fn app() -> Router {
         kv_capacity_blocks,
         limiter: RateLimiter::new(),
         budgets: TokenBudgets::new(),
-        model_path: tokio::sync::RwLock::new(std::env::var("RUNNER_MODEL").ok()),
+        model_path: std::sync::Arc::new(tokio::sync::RwLock::new(std::env::var("RUNNER_MODEL").ok())),
     };
 
     Router::new()
@@ -95,7 +95,7 @@ fn select_backend() -> Arc<dyn InferenceBackend> {
     if let Ok(model_path) = std::env::var("RUNNER_MODEL") {
         let llama = LlamaCppBackend::new();
         // ignore params for now
-        if llama.load_model(&model_path, runner_backend::LoadParams).is_ok() {
+        if llama.load_model(&model_path, runner_backend::LoadParams::default()).is_ok() {
             tracing::info!(target: "api", "using llama.cpp backend with model {}", model_path);
             return Arc::new(llama);
         } else {
@@ -115,7 +115,7 @@ async fn metrics() -> impl IntoResponse {
 async fn readyz(State(state): State<AppState>) -> impl IntoResponse {
     // ready if scheduler is running and (if a model was requested) a path is set
     let has_model = state.model_path.read().await.is_some();
-    let running = state.scheduler.queue_depth.load(std::sync::atomic::Ordering::Relaxed) >= 0;
+    let running = true;
     if running { ([("content-type", "text/plain")], if has_model { "ready" } else { "ready-no-model" }) }
     else { ([("content-type", "text/plain")], "not-ready") }
 }
@@ -145,7 +145,7 @@ async fn generate(State(state): State<AppState>, Json(req): Json<GenerateRequest
     let text = if let Some(model_path) = state.model_path.read().await.clone() {
         // Try llama backend path with real decode if available
         let llama = LlamaCppBackend::new();
-        if llama.load_model(&model_path, runner_backend::LoadParams).is_ok() {
+        if llama.load_model(&model_path, runner_backend::LoadParams::default()).is_ok() {
             #[cfg(llama_ffi)]
             {
                 let _ = model_path; // silence unused in cfg
@@ -168,14 +168,14 @@ async fn generate(State(state): State<AppState>, Json(req): Json<GenerateRequest
     Json(GenerateResponse { text })
 }
 
-async fn generate_sse(State(state): State<AppState>) -> Sse<impl axum::response::sse::Stream<Item = Result<Event>>> {
+async fn generate_sse(State(state): State<AppState>) -> Sse<impl tokio_stream::Stream<Item = Result<Event>>> {
     state.requests_total.inc();
     let (tx, rx) = tokio::sync::mpsc::channel(16);
     let start = std::time::Instant::now();
     tokio::spawn(async move {
         if let Ok(model_path) = std::env::var("RUNNER_MODEL") {
             let llama = LlamaCppBackend::new();
-            if llama.load_model(&model_path, runner_backend::LoadParams).is_ok() {
+            if llama.load_model(&model_path, runner_backend::LoadParams::default()).is_ok() {
                 #[cfg(llama_ffi)]
                 {
                     let mut emit = |piece: String| {
@@ -271,18 +271,44 @@ async fn chat_completions(State(state): State<AppState>, Json(req): Json<ChatReq
         return Json(resp).into_response();
     }
     tracing::info!(target: "api", "chat request: {} messages", req.messages.len());
+    // Build a simple chat-style prompt to avoid echoing behavior
     let mut prompt = String::new();
-    for m in &req.messages { if m.role == "system" || m.role == "user" { prompt.push_str(&m.content); prompt.push('\n'); } }
-    if req.stream.unwrap_or(false) {
-        return chat_completions_stream(state, Json(req)).await.into_response();
+    prompt.push_str("System: You are a helpful assistant.\n");
+    for m in &req.messages {
+        if m.role == "system" {
+            prompt.push_str("System: "); prompt.push_str(&m.content); prompt.push('\n');
+        } else if m.role == "user" {
+            prompt.push_str("User: "); prompt.push_str(&m.content); prompt.push('\n');
+        }
     }
-    let text = generate_once(state.backend.as_ref(), &prompt, req.max_tokens.unwrap_or(128)).unwrap_or_else(|_| String::new());
+    prompt.push_str("Assistant: ");
+    if req.stream.unwrap_or(false) {
+        return chat_completions_stream(axum::extract::State(state), Json(req)).await.into_response();
+    }
+    // Prefer llama.cpp backend when a model path is configured
+    let text = if let Some(model_path) = state.model_path.read().await.clone() {
+        let llama = LlamaCppBackend::new();
+        if llama.load_model(&model_path, runner_backend::LoadParams::default()).is_ok() {
+            #[cfg(llama_ffi)]
+            {
+                let mut acc = String::new();
+                let _ = llama.generate_with_callback(&prompt, req.max_tokens.unwrap_or(128), |piece| { acc.push_str(&piece); });
+                acc
+            }
+            #[cfg(not(llama_ffi))]
+            { generate_once(state.backend.as_ref(), &prompt, req.max_tokens.unwrap_or(128)).unwrap_or_else(|_| String::new()) }
+        } else {
+            runner_core::scheduler::SchedulerV1::enqueue(&state.scheduler, prompt.clone(), req.max_tokens.unwrap_or(128)).await
+        }
+    } else {
+        runner_core::scheduler::SchedulerV1::enqueue(&state.scheduler, prompt.clone(), req.max_tokens.unwrap_or(128)).await
+    };
     let resp = ChatResponse { id: "chatcmpl-1".into(), object: "chat.completion".into(), choices: vec![ChatChoice { index: 0, message: ChatChoiceMessage { role: "assistant".into(), content: text }, finish_reason: "stop".into() }] };
     Json(resp).into_response()
 }
 
 // Streamed chat (OpenAI-style) when stream=true
-async fn chat_completions_stream(State(state): State<AppState>, Json(req): Json<ChatRequest>) -> Sse<impl axum::response::sse::Stream<Item = Result<Event>>> {
+async fn chat_completions_stream(State(state): State<AppState>, Json(_req): Json<ChatRequest>) -> Sse<impl tokio_stream::Stream<Item = Result<Event>>> {
     state.requests_total.inc();
     let (tx, rx) = tokio::sync::mpsc::channel(32);
     tokio::spawn(async move {

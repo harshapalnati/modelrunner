@@ -9,10 +9,16 @@ clap = { workspace = true }
 runner-api = { path = "../runner-api" }
 runner-backend = { path = "../runner-backend" }
 runner-core = { path = "../runner-core" }
+runner-common = { path = "../runner-common" }
 tokio = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
+tracing-opentelemetry = { workspace = true }
+opentelemetry-otlp = { workspace = true }
 axum = { workspace = true }
 reqwest = { workspace = true }
 sysinfo = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }
 

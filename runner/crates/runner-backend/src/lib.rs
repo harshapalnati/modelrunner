@@ -29,7 +29,6 @@ pub trait InferenceBackend: Send + Sync {
 #[cfg(feature = "mock")]
 pub mod mock {
     use super::*;
-    use runner_common::RunnerError;
 
     #[derive(Default)]
     pub struct MockBackend;

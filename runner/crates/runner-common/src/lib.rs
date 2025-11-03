@@ -45,10 +45,10 @@ pub mod config {
             if let Ok(dir) = env::var("RUNNER_MODEL_DIR") {
                 cfg.model_dir = PathBuf::from(dir);
             }
-            if let Ok(v) = env::var("RUNNER_CONTEXT_SIZE").ok().and_then(|v| v.parse().ok()) { cfg.context_size = Some(v); }
-            if let Ok(v) = env::var("RUNNER_GPU_LAYERS").ok().and_then(|v| v.parse().ok()) { cfg.gpu_layers = Some(v); }
-            if let Ok(v) = env::var("RUNNER_TICK_MS").ok().and_then(|v| v.parse().ok()) { cfg.scheduler_tick_ms = Some(v); }
-            if let Ok(v) = env::var("RUNNER_MAX_BATCH_TOKENS").ok().and_then(|v| v.parse().ok()) { cfg.max_batch_tokens = Some(v); }
+            if let Some(v) = env::var("RUNNER_CONTEXT_SIZE").ok().and_then(|v| v.parse().ok()) { cfg.context_size = Some(v); }
+            if let Some(v) = env::var("RUNNER_GPU_LAYERS").ok().and_then(|v| v.parse().ok()) { cfg.gpu_layers = Some(v); }
+            if let Some(v) = env::var("RUNNER_TICK_MS").ok().and_then(|v| v.parse().ok()) { cfg.scheduler_tick_ms = Some(v); }
+            if let Some(v) = env::var("RUNNER_MAX_BATCH_TOKENS").ok().and_then(|v| v.parse().ok()) { cfg.max_batch_tokens = Some(v); }
             cfg
         }
     }

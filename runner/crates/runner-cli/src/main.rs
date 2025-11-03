@@ -4,6 +4,7 @@ use runner_api::app;
 use runner_backend::mock::MockBackend;
 use runner_core::decode::generate_once;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
+use opentelemetry_otlp::WithExportConfig;
 use tracing_opentelemetry::OpenTelemetryLayer;
 
 #[derive(Parser, Debug)]
@@ -90,7 +91,7 @@ async fn list_models() {
 }
 
 async fn stats() {
-    use sysinfo::{System, SystemExt, CpuExt};
+    use sysinfo::System;
     let mut sys = System::new_all();
     sys.refresh_all();
     let total_mem = sys.total_memory();

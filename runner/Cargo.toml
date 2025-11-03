@@ -21,21 +21,21 @@ anyhow = "1"
 thiserror = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-tokio = { version = "1.35", features = ["rt-multi-thread", "macros", "time"] }
-axum = { version = "0.7", default-features = false, features = ["json", "ws"] }
+tokio = { version = "1.35", features = ["rt-multi-thread", "macros", "time", "signal"] }
+axum = { version = "0.7", default-features = false, features = ["json", "ws", "tokio", "http1"] }
 tokio-stream = { version = "0.1", features = ["sync"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "registry"] }
 tracing-opentelemetry = "0.23"
 prometheus = "0.13"
 opentelemetry = { version = "0.22", default-features = false, features = ["trace"] }
-opentelemetry-otlp = { version = "0.15", default-features = false, features = ["trace"] }
+opentelemetry-otlp = { version = "0.15", default-features = false, features = ["trace", "grpc-tonic"] }
 clap = { version = "4.4", features = ["derive"] }
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream", "json"] }
 tokenizers = { version = "0.15", default-features = false }
 serde_yaml = "0.9"
 once_cell = "1"
-sysinfo = { version = "0.30", default-features = false, features = ["system", "cpu", "disk", "memory"] }
-nvml-wrapper = { version = "0.10", optional = true }
+sysinfo = "0.30"
+nvml-wrapper = "0.10"
 rand = "0.8"
 
