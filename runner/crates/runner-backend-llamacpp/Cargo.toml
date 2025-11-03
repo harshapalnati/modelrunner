@@ -1,0 +1,23 @@
+[package]
+name = "runner-backend-llamacpp"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+build = "build.rs"
+
+[features]
+default = ["cpu"]
+cpu = []
+cuda = []
+metal = []
+rocm = []
+fpga = []
+
+[dependencies]
+runner-backend = { path = "../runner-backend" }
+runner-common = { path = "../runner-common" }
+
+[build-dependencies]
+cc = "1"
+bindgen = "0.69"
+

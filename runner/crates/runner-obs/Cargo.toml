@@ -1,0 +1,21 @@
+[package]
+name = "runner-obs"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+
+[dependencies]
+prometheus = { workspace = true }
+tracing = { workspace = true }
+opentelemetry = { workspace = true }
+opentelemetry-otlp = { workspace = true }
+sysinfo = { workspace = true }
+
+[features]
+default = []
+nvidia = ["dep:nvml-wrapper"]
+
+[dependencies.nvml-wrapper]
+workspace = true
+optional = true
+
